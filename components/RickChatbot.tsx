@@ -1,15 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Volume2, RotateCcw, Trash2 } from 'lucide-react';
-import { saveMessage, loadConversation, clearConversation } from '../lib/conversationStorage';
 
 const RickChatbot = () => {
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [audioUrl, setAudioUrl] = useState(null);
-  const [pendingMessage, setPendingMessage] = useState(null); // Store message until audio plays
+  const [pendingMessage, setPendingMessage] = useState(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
-  const [memoryLoaded, setMemoryLoaded] = useState(false); // Track if conversation is loaded
+  const [sessionId, setSessionId] = useState(null);
+  const [memoryLoaded, setMemoryLoaded] = useState(false);
   const messagesEndRef = useRef(null);
   const audioRef = useRef(null);
 
@@ -21,26 +21,61 @@ const RickChatbot = () => {
     scrollToBottom();
   }, [messages]);
 
-  // Load conversation history on component mount
+  // Generate session ID on client side only
   useEffect(() => {
-    const loadConversationHistory = async () => {
-      try {
-        const data = await loadConversation();
+    const generateSessionId = () => {
+      return 'session_' + Date.now() + '_' + Math.random().toString(36).substring(2, 15);
+    };
+    
+    const newSessionId = generateSessionId();
+    setSessionId(newSessionId);
+    loadConversationHistory(newSessionId);
+  }, []);
+
+  // Load conversation history
+  const loadConversationHistory = async (currentSessionId) => {
+    try {
+      const response = await fetch('/api/conversation', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-ID': currentSessionId,
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
         if (data.messages && Array.isArray(data.messages)) {
           setMessages(data.messages);
           if (data.lastAudioUrl) {
             setAudioUrl(data.lastAudioUrl);
           }
         }
-      } catch (error) {
-        console.error('Error loading conversation history:', error);
-      } finally {
-        setMemoryLoaded(true);
       }
-    };
+    } catch (error) {
+      console.error('Error loading conversation history:', error);
+    } finally {
+      setMemoryLoaded(true);
+    }
+  };
 
-    loadConversationHistory();
-  }, []);
+  // Save message to backend
+  const saveMessage = async (message) => {
+    if (!sessionId) return;
+    
+    try {
+      await fetch('/api/conversation', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-ID': sessionId,
+        },
+        body: JSON.stringify({ message }),
+      });
+    } catch (error) {
+      console.error('Error saving message:', error);
+    }
+  };
 
   // Handle audio playback when audioUrl updates
   useEffect(() => {
@@ -49,7 +84,7 @@ const RickChatbot = () => {
       audioRef.current.src = audioUrl;
       audioRef.current.load();
       audioRef.current.play().catch(err => {
-        console.error('Playbook error', err);
+        console.error('Audio playback error:', err);
         // If audio fails to play, show message immediately
         addMessageToState(pendingMessage);
         setPendingMessage(null);
@@ -72,6 +107,7 @@ const RickChatbot = () => {
     };
 
     const handleAudioError = () => {
+      console.error('Audio playback error');
       if (pendingMessage) {
         addMessageToState(pendingMessage);
         setPendingMessage(null);
@@ -88,24 +124,18 @@ const RickChatbot = () => {
     };
   }, [pendingMessage]);
 
-  // Helper function to add message to state and save to Firebase
+  // Helper function to add message to state and save
   const addMessageToState = async (message) => {
-    setMessages(prev => {
-      const newMessages = [...prev, message];
-      // Save to Firebase asynchronously
-      saveMessage(message).catch(error => {
-        console.error('Error saving message to Firebase:', error);
-      });
-      return newMessages;
-    });
+    setMessages(prev => [...prev, message]);
+    await saveMessage(message);
   };
 
   const sendMessage = async () => {
-    if (!inputMessage.trim() || isLoading || !memoryLoaded) return;
+    if (!inputMessage.trim() || isLoading || !memoryLoaded || !sessionId) return;
 
     const userMessage = { role: 'user', content: inputMessage, timestamp: Date.now() };
     
-    // Add user message to state and save to Firebase
+    // Add user message to state and save
     await addMessageToState(userMessage);
     
     setInputMessage('');
@@ -141,7 +171,7 @@ const RickChatbot = () => {
         setPendingMessage(rickMessage);
         setAudioUrl(data.audioUrl);
       } else {
-        // No audio, show message immediately and save to Firebase
+        // No audio, show message immediately and save
         await addMessageToState(rickMessage);
       }
 
@@ -149,7 +179,7 @@ const RickChatbot = () => {
       console.error('Error sending message:', error);
       const errorMessage = { 
         role: 'assistant', 
-        content: 'Aw jeez, something went wrong with the interdimensional communication! Try again, *burp*', 
+        content: 'Aw jeez, something went wrong with the interdimensional communication! Try again!', 
         timestamp: Date.now() 
       };
       await addMessageToState(errorMessage);
@@ -159,14 +189,23 @@ const RickChatbot = () => {
   };
 
   const clearChat = async () => {
+    if (!sessionId) return;
+    
     try {
-      await clearConversation();
+      await fetch('/api/conversation', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-ID': sessionId,
+        },
+      });
+      
       setMessages([]);
       setAudioUrl(null);
       setPendingMessage(null);
       setIsPlayingAudio(false);
     } catch (error) {
-      console.error('Error clearing conversation history:', error);
+      console.error('Error clearing conversation:', error);
     }
   };
 
@@ -184,8 +223,8 @@ const RickChatbot = () => {
     }
   };
 
-  // Don't render until conversation is loaded
-  if (!memoryLoaded) {
+  // Don't render until memory is loaded and session ID is set
+  if (!memoryLoaded || !sessionId) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-900 via-blue-900 to-purple-900 flex items-center justify-center">
         <div className="text-green-400 text-xl">Loading Rick's memory... 🧪</div>
@@ -214,7 +253,7 @@ const RickChatbot = () => {
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.length === 0 && !isPlayingAudio && (
               <div className="text-center text-green-300 mt-8">
-                <p className="text-lg mb-2">Hey there, *burp* genius!</p>
+                <p className="text-lg mb-2">Hey there, genius!</p>
                 <p className="text-sm opacity-75">Ask Rick something scientific, philosophical, or just plain stupid...</p>
               </div>
             )}
@@ -240,7 +279,7 @@ const RickChatbot = () => {
               <div className="flex justify-start">
                 <div className="bg-green-600 bg-opacity-50 text-green-100 p-3 rounded-lg border border-green-400">
                   <p className="text-sm">
-                    {isPlayingAudio ? 'Rick is speaking... 🎵' : 'Rick is thinking... *burp*'}
+                    {isPlayingAudio ? 'Rick is speaking... 🎵' : 'Rick is thinking...'}
                   </p>
                   <div className="flex space-x-1 mt-2">
                     <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce"></div>
@@ -309,6 +348,7 @@ const RickChatbot = () => {
         {/* Footer */}
         <div className="text-center mt-4 text-green-300 text-sm opacity-75">
           <p>🔬 Powered by interdimensional science and AI 🔬</p>
+          <p className="text-xs mt-1">Session: {sessionId?.substring(0, 12)}...</p>
         </div>
       </div>
     </div>
