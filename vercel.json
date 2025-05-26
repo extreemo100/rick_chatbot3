@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "pages/api/chat.js": {
+      "maxDuration": 30
+    }
+  },
+  "env": {
+    "OPENAI_API_KEY": "@openai_api_key",
+    "FISH_API_KEY": "@fish_api_key",
+    "FISH_MODEL_ID": "@fish_model_id"
+  }
+}
