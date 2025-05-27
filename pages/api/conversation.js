@@ -1,4 +1,3 @@
-// pages/api/conversation.js
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, doc, setDoc, getDoc, deleteDoc, updateDoc, arrayUnion } from 'firebase/firestore';
 
@@ -44,6 +43,8 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Session ID is required' });
   }
 
+  console.log(`${req.method} request for session: ${sessionId}`);
+
   try {
     switch (req.method) {
       case 'GET':
@@ -53,11 +54,13 @@ export default async function handler(req, res) {
         
         if (docSnap.exists()) {
           const data = docSnap.data();
+          console.log(`Loaded ${data.messages?.length || 0} messages for session ${sessionId}`);
           res.status(200).json({
             messages: data.messages || [],
             lastAudioUrl: data.lastAudioUrl || null
           });
         } else {
+          console.log(`No existing conversation found for session ${sessionId}`);
           res.status(200).json({ messages: [], lastAudioUrl: null });
         }
         break;
@@ -70,19 +73,69 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: 'Message is required' });
         }
 
+        console.log(`Saving message for session ${sessionId}:`, message.role);
+
         try {
-          // Try to update existing document
-          await updateDoc(doc(db, 'conversations', sessionId), {
-            messages: arrayUnion(message),
-            lastUpdated: Date.now()
-          });
+          const docRef = doc(db, 'conversations', sessionId);
+          const docSnap = await getDoc(docRef);
+          
+          if (docSnap.exists()) {
+            // Update existing document
+            await updateDoc(docRef, {
+              messages: arrayUnion(message),
+              lastUpdated: Date.now()
+            });
+            console.log('Message added to existing conversation');
+          } else {
+            // Create new document
+            await setDoc(docRef, {
+              messages: [message],
+              lastUpdated: Date.now(),
+              createdAt: Date.now()
+            });
+            console.log('New conversation created with message');
+          }
         } catch (error) {
-          // If document doesn't exist, create it
-          await setDoc(doc(db, 'conversations', sessionId), {
-            messages: [message],
-            lastUpdated: Date.now(),
-            createdAt: Date.now()
-          });
+          console.error('Error saving message:', error);
+          throw error;
+        }
+        
+        res.status(200).json({ success: true });
+        break;
+
+      case 'PUT':
+        // Update audio URL
+        const { audioUrl } = req.body;
+        
+        if (!audioUrl) {
+          return res.status(400).json({ error: 'Audio URL is required' });
+        }
+
+        console.log(`Saving audio URL for session ${sessionId}`);
+
+        try {
+          const docRef = doc(db, 'conversations', sessionId);
+          const docSnap = await getDoc(docRef);
+          
+          if (docSnap.exists()) {
+            await updateDoc(docRef, {
+              lastAudioUrl: audioUrl,
+              lastUpdated: Date.now()
+            });
+            console.log('Audio URL saved successfully');
+          } else {
+            // Create document with audio URL if it doesn't exist
+            await setDoc(docRef, {
+              messages: [],
+              lastAudioUrl: audioUrl,
+              lastUpdated: Date.now(),
+              createdAt: Date.now()
+            });
+            console.log('New conversation created with audio URL');
+          }
+        } catch (error) {
+          console.error('Error saving audio URL:', error);
+          throw error;
         }
         
         res.status(200).json({ success: true });
@@ -90,8 +143,15 @@ export default async function handler(req, res) {
 
       case 'DELETE':
         // Clear conversation
-        await deleteDoc(doc(db, 'conversations', sessionId));
-        res.status(200).json({ success: true });
+        console.log(`Deleting conversation for session ${sessionId}`);
+        try {
+          await deleteDoc(doc(db, 'conversations', sessionId));
+          console.log('Conversation deleted successfully');
+          res.status(200).json({ success: true });
+        } catch (error) {
+          console.error('Error deleting conversation:', error);
+          throw error;
+        }
         break;
 
       default:
@@ -99,6 +159,9 @@ export default async function handler(req, res) {
     }
   } catch (error) {
     console.error('Conversation API error:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      details: error.message 
+    });
   }
 }
