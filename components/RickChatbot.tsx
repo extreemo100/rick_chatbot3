@@ -6,8 +6,6 @@ const RickChatbot = () => {
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [audioUrl, setAudioUrl] = useState(null);
-  const [pendingMessage, setPendingMessage] = useState(null);
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [sessionId, setSessionId] = useState(null);
   const [memoryLoaded, setMemoryLoaded] = useState(false);
   const messagesEndRef = useRef(null);
@@ -21,7 +19,7 @@ const RickChatbot = () => {
     scrollToBottom();
   }, [messages]);
 
-  // Generate session ID on client side only
+  // Generate session ID and load conversation history
   useEffect(() => {
     const generateSessionId = () => {
       return 'session_' + Date.now() + '_' + Math.random().toString(36).substring(2, 15);
@@ -32,7 +30,7 @@ const RickChatbot = () => {
     loadConversationHistory(newSessionId);
   }, []);
 
-  // Load conversation history
+  // Load conversation history from Firebase
   const loadConversationHistory = async (currentSessionId) => {
     try {
       const response = await fetch('/api/conversation', {
@@ -47,10 +45,14 @@ const RickChatbot = () => {
         const data = await response.json();
         if (data.messages && Array.isArray(data.messages)) {
           setMessages(data.messages);
-          if (data.lastAudioUrl) {
-            setAudioUrl(data.lastAudioUrl);
-          }
+          console.log('Loaded messages:', data.messages.length);
         }
+        if (data.lastAudioUrl) {
+          setAudioUrl(data.lastAudioUrl);
+          console.log('Loaded last audio URL');
+        }
+      } else {
+        console.error('Failed to load conversation:', response.status);
       }
     } catch (error) {
       console.error('Error loading conversation history:', error);
@@ -59,12 +61,15 @@ const RickChatbot = () => {
     }
   };
 
-  // Save message to backend
+  // Save message to Firebase
   const saveMessage = async (message) => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      console.error('No session ID available');
+      return;
+    }
     
     try {
-      await fetch('/api/conversation', {
+      const response = await fetch('/api/conversation', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -72,76 +77,53 @@ const RickChatbot = () => {
         },
         body: JSON.stringify({ message }),
       });
+
+      if (!response.ok) {
+        console.error('Failed to save message:', response.status);
+      }
     } catch (error) {
       console.error('Error saving message:', error);
     }
   };
 
-  // Handle audio playback when audioUrl updates
-  useEffect(() => {
-    if (audioUrl && audioRef.current && pendingMessage) {
-      setIsPlayingAudio(true);
-      audioRef.current.src = audioUrl;
-      audioRef.current.load();
-      audioRef.current.play().catch(err => {
-        console.error('Audio playback error:', err);
-        // If audio fails to play, show message immediately
-        addMessageToState(pendingMessage);
-        setPendingMessage(null);
-        setIsPlayingAudio(false);
+  // Save audio URL to Firebase
+  const saveAudioUrl = async (url) => {
+    if (!sessionId || !url) return;
+    
+    try {
+      await fetch('/api/conversation', {
+        method: 'PUT', // We'll add this method to update audio URL
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Session-ID': sessionId,
+        },
+        body: JSON.stringify({ audioUrl: url }),
       });
+    } catch (error) {
+      console.error('Error saving audio URL:', error);
     }
-  }, [audioUrl, pendingMessage]);
-
-  // Handle audio end event
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const handleAudioEnd = () => {
-      if (pendingMessage) {
-        addMessageToState(pendingMessage);
-        setPendingMessage(null);
-      }
-      setIsPlayingAudio(false);
-    };
-
-    const handleAudioError = () => {
-      console.error('Audio playback error');
-      if (pendingMessage) {
-        addMessageToState(pendingMessage);
-        setPendingMessage(null);
-      }
-      setIsPlayingAudio(false);
-    };
-
-    audio.addEventListener('ended', handleAudioEnd);
-    audio.addEventListener('error', handleAudioError);
-
-    return () => {
-      audio.removeEventListener('ended', handleAudioEnd);
-      audio.removeEventListener('error', handleAudioError);
-    };
-  }, [pendingMessage]);
-
-  // Helper function to add message to state and save
-  const addMessageToState = async (message) => {
-    setMessages(prev => [...prev, message]);
-    await saveMessage(message);
   };
 
   const sendMessage = async () => {
     if (!inputMessage.trim() || isLoading || !memoryLoaded || !sessionId) return;
 
-    const userMessage = { role: 'user', content: inputMessage, timestamp: Date.now() };
+    const userMessage = { 
+      role: 'user', 
+      content: inputMessage, 
+      timestamp: Date.now() 
+    };
     
-    // Add user message to state and save
-    await addMessageToState(userMessage);
+    // Add user message immediately to UI
+    setMessages(prev => [...prev, userMessage]);
+    
+    // Save user message to Firebase
+    await saveMessage(userMessage);
     
     setInputMessage('');
     setIsLoading(true);
 
     try {
+      // Get current messages for context
       const currentMessages = [...messages, userMessage];
       
       const response = await fetch('/api/chat', {
@@ -150,7 +132,7 @@ const RickChatbot = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          messages: currentMessages.slice(-10)
+          messages: currentMessages.slice(-10) // Last 10 messages for context
         }),
       });
 
@@ -166,13 +148,29 @@ const RickChatbot = () => {
         timestamp: Date.now() 
       };
 
-      // If there's audio, store message as pending and play audio first
+      // Add Rick's message to UI
+      setMessages(prev => [...prev, rickMessage]);
+      
+      // Save Rick's message to Firebase
+      await saveMessage(rickMessage);
+
+      // Handle audio if provided
       if (data.audioUrl) {
-        setPendingMessage(rickMessage);
+        console.log('Audio URL received:', data.audioUrl);
         setAudioUrl(data.audioUrl);
-      } else {
-        // No audio, show message immediately and save
-        await addMessageToState(rickMessage);
+        
+        // Save audio URL to Firebase
+        await saveAudioUrl(data.audioUrl);
+        
+        // Try to play audio
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.load();
+            audioRef.current.play().catch(e => {
+              console.log('Audio autoplay failed:', e);
+            });
+          }
+        }, 100);
       }
 
     } catch (error) {
@@ -182,7 +180,8 @@ const RickChatbot = () => {
         content: 'Aw jeez, something went wrong with the interdimensional communication! Try again!', 
         timestamp: Date.now() 
       };
-      await addMessageToState(errorMessage);
+      setMessages(prev => [...prev, errorMessage]);
+      await saveMessage(errorMessage);
     } finally {
       setIsLoading(false);
     }
@@ -192,7 +191,7 @@ const RickChatbot = () => {
     if (!sessionId) return;
     
     try {
-      await fetch('/api/conversation', {
+      const response = await fetch('/api/conversation', {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -200,10 +199,13 @@ const RickChatbot = () => {
         },
       });
       
-      setMessages([]);
-      setAudioUrl(null);
-      setPendingMessage(null);
-      setIsPlayingAudio(false);
+      if (response.ok) {
+        setMessages([]);
+        setAudioUrl(null);
+        console.log('Chat cleared successfully');
+      } else {
+        console.error('Failed to clear chat:', response.status);
+      }
     } catch (error) {
       console.error('Error clearing conversation:', error);
     }
@@ -212,7 +214,9 @@ const RickChatbot = () => {
   const replayAudio = () => {
     if (audioRef.current && audioUrl) {
       audioRef.current.currentTime = 0;
-      audioRef.current.play().catch(e => console.log('Audio play failed:', e));
+      audioRef.current.play().catch(e => {
+        console.log('Audio replay failed:', e);
+      });
     }
   };
 
@@ -223,11 +227,13 @@ const RickChatbot = () => {
     }
   };
 
-  // Don't render until memory is loaded and session ID is set
+  // Show loading screen while initializing
   if (!memoryLoaded || !sessionId) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-900 via-blue-900 to-purple-900 flex items-center justify-center">
-        <div className="text-green-400 text-xl">Loading Rick's memory... 🧪</div>
+        <div className="text-green-400 text-xl animate-pulse">
+          Loading Rick's memory... 🧪
+        </div>
       </div>
     );
   }
@@ -251,7 +257,7 @@ const RickChatbot = () => {
         <div className="flex-1 bg-black bg-opacity-30 backdrop-blur-sm rounded-lg border border-green-400 shadow-2xl mb-4 flex flex-col">
           {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {messages.length === 0 && !isPlayingAudio && (
+            {messages.length === 0 && (
               <div className="text-center text-green-300 mt-8">
                 <p className="text-lg mb-2">Hey there, genius!</p>
                 <p className="text-sm opacity-75">Ask Rick something scientific, philosophical, or just plain stupid...</p>
@@ -275,12 +281,10 @@ const RickChatbot = () => {
               </div>
             ))}
             
-            {(isLoading || isPlayingAudio) && (
+            {isLoading && (
               <div className="flex justify-start">
                 <div className="bg-green-600 bg-opacity-50 text-green-100 p-3 rounded-lg border border-green-400">
-                  <p className="text-sm">
-                    {isPlayingAudio ? 'Rick is speaking... 🎵' : 'Rick is thinking...'}
-                  </p>
+                  <p className="text-sm">Rick is thinking...</p>
                   <div className="flex space-x-1 mt-2">
                     <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
@@ -302,11 +306,11 @@ const RickChatbot = () => {
                 onKeyPress={handleKeyPress}
                 placeholder="Ask Rick something..."
                 className="flex-1 p-3 bg-black bg-opacity-50 border border-green-400 rounded-lg text-white placeholder-green-300 focus:outline-none focus:border-green-300 focus:ring-1 focus:ring-green-300"
-                disabled={isLoading || isPlayingAudio || !memoryLoaded}
+                disabled={isLoading || !memoryLoaded}
               />
               <button
                 onClick={sendMessage}
-                disabled={isLoading || isPlayingAudio || !inputMessage.trim() || !memoryLoaded}
+                disabled={isLoading || !inputMessage.trim() || !memoryLoaded}
                 className="p-3 bg-green-600 hover:bg-green-500 disabled:bg-gray-600 disabled:opacity-50 text-white rounded-lg transition-colors duration-200 flex items-center justify-center"
               >
                 <Send size={20} />
@@ -340,6 +344,7 @@ const RickChatbot = () => {
         {audioUrl && (
           <audio
             ref={audioRef}
+            src={audioUrl}
             className="hidden"
             preload="auto"
           />
@@ -349,6 +354,7 @@ const RickChatbot = () => {
         <div className="text-center mt-4 text-green-300 text-sm opacity-75">
           <p>🔬 Powered by interdimensional science and AI 🔬</p>
           <p className="text-xs mt-1">Session: {sessionId?.substring(0, 12)}...</p>
+          <p className="text-xs">Messages: {messages.length}</p>
         </div>
       </div>
     </div>
